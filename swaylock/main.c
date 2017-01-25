@@ -1,7 +1,16 @@
 #include "wayland-swaylock-client-protocol.h"
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-names.h>
+
+#if HAVE_PAM
 #include <security/pam_appl.h>
+#else
+#include <errno.h>
+#if HAVE_SHADOW_H
+#include <shadow.h>
+#endif /* HAVE_SHADOW_H */
+#endif /* HAVE_PAM */
+
 #include <json-c/json.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +64,8 @@ void sway_terminate(int exit_code) {
 
 char *password;
 int password_size;
+
+#if HAVE_PAM
 
 int function_conversation(int num_msg, const struct pam_message **msg,
 		struct pam_response **resp, void *appdata_ptr) {
@@ -112,6 +123,63 @@ bool verify_password() {
 	}
 	return true;
 }
+
+#else
+
+static const char *
+gethash(void)
+{
+	const char *hash;
+	struct passwd *pw;
+
+	/* Check if the current user has a password entry */
+	errno = 0;
+	if (!(pw = getpwuid(getuid()))) {
+		if (errno)
+			die("swaylock: getpwuid: %s\n", strerror(errno));
+		else
+			die("swaylock: cannot retrieve password entry\n");
+	}
+	hash = pw->pw_passwd;
+
+#if HAVE_SHADOW_H
+	if (!strcmp(hash, "x")) {
+		struct spwd *sp;
+		if (!(sp = getspnam(pw->pw_name)))
+			die("swaylock: getspnam: cannot retrieve shadow entry. "
+			    "Make sure to suid or sgid swaylock.\n");
+		hash = sp->sp_pwdp;
+	}
+#else
+	if (!strcmp(hash, "*")) {
+#ifdef __OpenBSD__
+		if (!(pw = getpwuid_shadow(getuid())))
+			die("swaylock: getpwnam_shadow: cannot retrieve shadow entry. "
+			    "Make sure to suid or sgid swaylock.\n");
+		hash = pw->pw_passwd;
+#else
+		die("swaylock: getpwuid: cannot retrieve shadow entry. "
+		    "Make sure to suid or sgid swaylock.\n");
+#endif /* __OpenBSD__ */
+	}
+#endif /* HAVE_SHADOW_H */
+
+	return hash;
+}
+
+bool verify_password() {
+	char *inputhash;
+	char *hash = gethash();
+	int running = 1;
+
+	if (!(inputhash = crypt(password, hash)))
+		fprintf(stderr, "swaylock: crypt: %s\n", strerror(errno));
+	else
+		running = !!strcmp(inputhash, hash);
+	return !running;
+}
+
+#endif
 
 void notify_key(enum wl_keyboard_key_state state, xkb_keysym_t sym, uint32_t code, uint32_t codepoint) {
 	int redraw_screen = 0;
